@@ -2,7 +2,7 @@
 
 A production-grade Android Weather Application featuring a smart home-screen widget, built using Kotlin, Jetpack Compose, Material 3, Clean Architecture, and WorkManager.
 
----
+----
 
 ## Architecture & Tech Stack
 - **Architecture:** MVVM + Clean Architecture (Presentation, Domain, Data)
@@ -16,7 +16,7 @@ A production-grade Android Weather Application featuring a smart home-screen wid
 - **Location Services:** Google Play Services Fused Location Provider
 - **Weather API:** Open-Meteo API (Free tier, no API key required)
 
----
+----
 
 ## Setup & Build Instructions
 
@@ -40,7 +40,7 @@ A production-grade Android Weather Application featuring a smart home-screen wid
    ./gradlew test
    ```
 
----
+----
 
 ## Open-Meteo Attribution
 Weather data provided by [Open-Meteo.com](https://open-meteo.com/) under the CC BY 4.0 license.

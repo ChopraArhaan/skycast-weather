@@ -1,6 +1,6 @@
 # Phase 1: Technical Plan & Architecture Specification
 **Project:** Production-Grade Android Weather App with Smart Auto-Updating Widget  
-**Document Version:** 1.1  
+**Document Version:** 1.2  
 **Status:** Revised & Pending Approval  
 
 ---
@@ -14,9 +14,9 @@
   - Returns raw, un-opinionated JSON for current conditions, hourly forecasts (up to 7 days), and daily forecasts (up to 16 days).
   - High accuracy using WMO weather interpretation codes (`weathercode`), temperature, feels-like (`apparent_temperature`), relative humidity, surface pressure, wind speed/direction, UV index, visibility, precipitation probability, and sunrise/sunset times.
   - Zero API keys or secrets to store or expose.
-- **API Efficiency Rules:**
-  - **Single Request per Location:** Batch and deduplicate requests so that only one API network request is dispatched per unique location ID, regardless of how many widget instances exist.
-  - **Cache First:** Always query Room cache before making a network call. If cached data for a location is less than 15 minutes old, return the cache without triggering a network request.
+- **API Efficiency & Deduplication Rules:**
+  - **Single Fetch per Distinct Location:** `RefreshWeatherWorker` aggregates all active widget instances and saved app locations, groups them by distinct location coordinates, and fetches weather from Open-Meteo **exactly once per distinct location**, regardless of how many widget instances point to the same city.
+  - **Cache First:** Always query Room cache before making a network call. If cached data for a location is less than 15 minutes old, return the cache without triggering a network request (unless explicitly forced by manual refresh).
 - **Weather Alerts Note & v1 Decision:**
   - Open-Meteo's standard core forecast endpoint does **not** supply severe weather alerts/warnings.
   - *v1 Decision:* Weather alerts are explicitly marked **out of scope for v1** in compliance with the rule: *"Never fabricate weather data or alerts."* If alert endpoints are added by Open-Meteo or another provider in the future, they will be integrated in subsequent releases.
@@ -30,11 +30,22 @@
   - **City Search:** Use Open-Meteo's dedicated Geocoding API (`geocoding-api.open-meteo.com/v1/search`) for text-based city search.
   - **Reverse Geocoding (Lat/Lon -> City Name):** Use Android's system `android.location.Geocoder` API (with fallback to Open-Meteo search API or saved coordinate label) to resolve human-readable city and region names for GPS location fixes.
 
-### 1.3 Widget Framework: Jetpack Glance (`androidx.glance:glance-appwidget`)
+### 1.3 Widget Framework & Architecture (`androidx.glance:glance-appwidget`)
 - **Feasibility:** High.
-- **Architecture Decision (Single Responsive Widget vs 4 Separate Widgets):**
-  - **Decision:** Implement **a single `GlanceAppWidget`** using `SizeMode.Responsive` rather than 4 separate widget items in the launcher widget picker.
-  - **Justification:** Providing a single responsive widget simplifies the user experience in the home-screen widget selector while allowing a single placed widget to dynamically switch between 4 layout variants (`Compact`, `Standard`, `Detailed`, `Minimal`) based on `LocalSize.current` width and height bounds as the user resizes it on their home screen.
+- **Widget Architecture (Single `GlanceAppWidget` with Responsive Layouts & Minimal Style Option):**
+  - **Single Widget Definition:** Implement **one `GlanceAppWidget`** registered in `AndroidManifest.xml` rather than 4 separate widgets in the launcher picker.
+  - **Size-Based Responsive Layouts:** The widget evaluates `LocalSize.current` bounds (width x height) to automatically render one of three standard layouts:
+    1. `Compact` (e.g. 1x1 to 2x1: temperature, weather icon, location name)
+    2. `Standard` (e.g. 2x2: temperature, condition text, high/low range)
+    3. `Detailed` (e.g. 4x2: temperature, feels-like, humidity, wind speed, high/low range)
+  - **Per-Widget "Minimal" Style Option:** Users can toggle a "Minimal" style option in the configuration screen. When enabled for a specific widget ID, the widget overrides standard size layouts and displays a minimal, large temperature-focused layout regardless of size.
+  - **Configuration Activity (`WeatherWidgetConfigActivity`):**
+    - Triggered automatically by Android OS when a user places a new widget on the home screen (`android:configure`).
+    - Receives `AppWidgetManager.EXTRA_APPWIDGET_ID`.
+    - Allows the user to configure: (1) Target location for this widget instance (Current GPS Location vs Specific Saved City), and (2) Style preference (Standard Responsive vs Minimal Temperature-Focused).
+    - Persists preferences into DataStore key-value pairs keyed by `appWidgetId`, returns `RESULT_OK`, and triggers immediate initial Glance widget rendering.
+  - **`onDeleted` Cleanup:**
+    - Override `GlanceAppWidgetReceiver.onDeleted(context, appWidgetIds)` to delete stored preferences for removed `appWidgetId`s from DataStore, preventing orphaned preference leaks.
 - **Icons & Graphics:**
   - **No Coil Required:** Weather condition icons are mapped directly from WMO weather codes to local vector drawables (`R.drawable.ic_weather_*`) rendered using Glance vector primitives. External image loading libraries (such as Coil) are unnecessary and removed from the dependency stack.
 
@@ -47,33 +58,41 @@
 
 ### 1.5 Location Handling & Widget Location Model
 - **Location Model:**
-  - Each widget instance can be configured via a Widget Configuration Activity (or global preference) to target either **"Current Location"** or a specific **"Saved Location"** (e.g., London).
-  - For "Current Location", the app/worker uses the **last-known coordinates** captured when the user last opened the main app (stored in DataStore / Room).
+  - Each widget instance tracks either **"Current Location"** or a specific **"Saved Location"** (configured via `WeatherWidgetConfigActivity` and stored per `appWidgetId`).
+  - For "Current Location", the background worker uses the **last-known coordinates** captured when the user last opened the main app (stored in DataStore / Room).
   - **Background Location (`ACCESS_BACKGROUND_LOCATION`) is OPTIONAL in v1.** The app does not require background location permission. If location is unavailable or denied, the widget seamlessly falls back to the user's primary saved location.
 
 ---
 
 ## 2. Recommended Tech Stack & Verified Versions
 
-### 2.1 Minimum SDK & Target SDK
-- **Recommended `minSdk`:** **26 (Android 8.0 Oreo)** — Covers ~95%+ of active devices globally. Guarantees native support for Notification Channels, `java.time` APIs without desugaring overhead, and modern WorkManager constraints.
-- **Target / Compile `targetSdk`:** **35 (Android 15)** — Complies with Google Play's mandatory `targetSdk` requirements for 2024/2025.
+### 2.1 Google Play Target API Level Requirement & Min SDK
+- **Google Play Target SDK Requirement:** Per official Google Play Policy ([developer.android.com/google-play/requirements/target-sdk](https://developer.android.com/google-play/requirements/target-sdk)), new apps and app updates must target **Android 15 (API level 35)** (or higher starting late 2024/2025).
+  - `compileSdk = 35`
+  - `targetSdk = 35`
+  - `minSdk = 26` (Android 8.0 Oreo — covers ~95%+ of active devices globally, providing native Notification Channels, `java.time` APIs without desugaring, and modern WorkManager capabilities).
 
-### 2.2 Verified Dependency Stack (as of 2024/2025)
-| Component | Library | Verified Version | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Language** | Kotlin | `2.0.21` | Language & Compiler |
-| **Build Tool** | Android Gradle Plugin (AGP) | `8.7.3` | Build system |
-| **Annotation Processing** | KSP (`com.google.devtools.ksp`) | `2.0.21-1.0.27` | High-performance code generation (replaces kapt) |
-| **UI Framework** | Jetpack Compose BOM | `2024.10.01` | Material 3, Canvas, Dynamic Color |
-| **Widget Engine** | Jetpack Glance AppWidget | `1.1.1` | Declarative Compose-style RemoteViews |
-| **Background Processing** | WorkManager KTX | `2.10.0` | Background task scheduling |
-| **Dependency Injection** | Hilt | `2.52` | Dependency injection & Hilt Worker integration |
-| **Database / Cache** | Room | `2.6.1` | Local SQLite weather cache & saved locations |
-| **Preferences** | DataStore Preferences | `1.1.1` | User settings (°C/°F, dark theme, active location) |
-| **Networking** | Retrofit 2 + OkHttp 4 | `2.11.0` / `4.12.0` | Type-safe REST client |
-| **Serialization** | kotlinx.serialization | `1.7.3` | Pure Kotlin JSON parsing |
-| **Location** | Play Services Location | `21.3.0` | Fused Location Provider API |
+### 2.2 Verified Dependency Stack & Official Citations
+| Component | Library | Verified Stable Version | Official Source / Citation | Purpose |
+| :--- | :--- | :---: | :--- | :--- |
+| **Language** | Kotlin | `2.0.21` | [kotlinlang.org/docs/releases.html](https://kotlinlang.org/docs/releases.html) | Language & Compiler |
+| **Build Tool** | Android Gradle Plugin (AGP) | `8.7.3` | [developer.android.com/studio/releases/gradle-plugin](https://developer.android.com/studio/releases/gradle-plugin) | Android Build System |
+| **Annotation Processing** | KSP (`com.google.devtools.ksp`) | `2.0.21-1.0.27` | [github.com/google/ksp/releases](https://github.com/google/ksp/releases) | High-performance code gen (replaces kapt) |
+| **UI Framework** | Jetpack Compose BOM | `2024.10.01` | [developer.android.com/develop/ui/compose/bom/bom-mapping](https://developer.android.com/develop/ui/compose/bom/bom-mapping) | Material 3, Dynamic Color, UI primitives |
+| **Widget Engine** | Jetpack Glance AppWidget | `1.1.1` | [developer.android.com/jetpack/androidx/releases/glance](https://developer.android.com/jetpack/androidx/releases/glance) | Declarative Compose-style RemoteViews |
+| **Background Processing** | WorkManager KTX | `2.10.0` | [developer.android.com/jetpack/androidx/releases/work](https://developer.android.com/jetpack/androidx/releases/work) | Persistent task scheduling & constraints |
+| **Dependency Injection** | Hilt | `2.52` | [github.com/google/dagger/releases](https://github.com/google/dagger/releases) | Dependency injection & Hilt Worker integration |
+| **Database / Cache** | Room | `2.6.1` | [developer.android.com/jetpack/androidx/releases/room](https://developer.android.com/jetpack/androidx/releases/room) | Local SQLite weather cache & saved locations |
+| **Preferences** | DataStore Preferences | `1.1.1` | [developer.android.com/jetpack/androidx/releases/datastore](https://developer.android.com/jetpack/androidx/releases/datastore) | User & widget settings (°C/°F, location IDs) |
+| **Networking** | Retrofit 2 | `2.11.0` | [github.com/square/retrofit/releases](https://github.com/square/retrofit/releases) | Type-safe REST client |
+| **HTTP Client** | OkHttp 4 | `4.12.0` | [square.github.io/okhttp](https://square.github.io/okhttp) | HTTP networking & logging interceptor |
+| **Serialization** | kotlinx.serialization | `1.7.3` | [github.com/Kotlin/kotlinx.serialization/releases](https://github.com/Kotlin/kotlinx.serialization/releases) | Pure Kotlin JSON parsing |
+| **Location** | Play Services Location | `21.3.0` | [developer.android.com/google/play-services](https://developer.android.com/google/play-services) | Fused Location Provider API |
+
+### 2.3 Compatibility Confirmation
+- **Kotlin 2.0.21 + KSP 2.0.21-1.0.27 + AGP 8.7.3:** Fully compatible. Kotlin 2.0+ uses the built-in Compose Compiler plugin (`org.jetbrains.kotlin.plugin.compose`).
+- **Compose BOM 2024.10.01 + Glance 1.1.1:** Fully compatible. Provides Compose UI 1.7.x primitives for app UI and Glance 1.1.1 RemoteViews.
+- **Room 2.6.1 + Hilt 2.52 + WorkManager 2.10.0:** Fully compatible with KSP annotation processing and `@HiltWorker`.
 
 ---
 
@@ -83,7 +102,7 @@
 ```
 +-----------------------------------------------------------------------+
 |                          PRESENTATION LAYER                           |
-|  [Compose Screens / ViewModels]       [Glance Widget & Receivers]     |
+|  [Compose Screens / ViewModels]       [Glance Widget & Config Act]    |
 +-----------------------------------++----------------------------------+
                                     ||
                                     \/
@@ -180,13 +199,14 @@ app/src/main/java/com/weatherapp/
 │   └── util/                        # UI helpers & formatters
 ├── widget/                          # Jetpack Glance Responsive Widget
 │   ├── WeatherGlanceWidget.kt       # Single responsive GlanceAppWidget definition
-│   ├── WeatherGlanceReceiver.kt     # GlanceAppWidgetReceiver
+│   ├── WeatherGlanceReceiver.kt     # GlanceAppWidgetReceiver (with onDeleted cleanup)
+│   ├── WeatherWidgetConfigActivity.kt # Configuration Activity per widget instance
 │   ├── GlanceDependencies.kt        # Hilt EntryPoint interface
-│   └── layouts/                     # Responsive size breakpoint layouts
-│       ├── CompactWidgetLayout.kt   # Variant 1: Temp, icon, location
-│       ├── StandardWidgetLayout.kt  # Variant 2: Temp, condition, high/low
-│       ├── DetailedWidgetLayout.kt  # Variant 3: Temp, feels-like, humidity, wind
-│       └── MinimalWidgetLayout.kt   # Variant 4: Large temp-focused
+│   └── layouts/                     # Responsive size breakpoint & style layouts
+│       ├── CompactWidgetLayout.kt   # Size Variant 1: Temp, icon, location
+│       ├── StandardWidgetLayout.kt  # Size Variant 2: Temp, condition, high/low
+│       ├── DetailedWidgetLayout.kt  # Size Variant 3: Temp, feels-like, humidity, wind
+│       └── MinimalWidgetLayout.kt   # Style Option Override: Large temp-focused
 └── worker/                          # Background WorkManager Workers
     └── RefreshWeatherWorker.kt      # Periodic & One-Time Refresh Worker (@HiltWorker)
 ```
@@ -204,7 +224,7 @@ app/src/main/java/com/weatherapp/
 
 ---
 
-## 5. Detailed Widget Auto-Refresh Strategy
+## 5. Detailed Widget Auto-Refresh Strategy & WorkManager Behavior
 
 ### 5.1 Single Source of Truth & Cache-Only Rendering
 - **Core Principle:** The widget **never** executes network calls directly.
@@ -224,19 +244,24 @@ app/src/main/java/com/weatherapp/
 +------------------+                  +-----------------------+
 ```
 
-### 5.2 WorkManager Enqueue Policies & Retries
+### 5.2 WorkManager Scheduling, Manual Refresh & Exhausted Retry Behavior
 - **Periodic Refresh Worker:**
   - `PeriodicWorkRequestBuilder<RefreshWeatherWorker>(30, TimeUnit.MINUTES)`
   - Constraints: `NetworkType.CONNECTED`.
   - Enqueue Policy: `ExistingPeriodicWorkPolicy.UPDATE` (WorkManager 2.8+) to keep the schedule updated without resetting interval timings.
-- **One-Time Manual / Immediate Refresh:**
-  - Triggered on: Widget added to home screen, user clicks manual refresh button on widget, active location changed in-app.
-  - Enqueue Policy: `ExistingWorkPolicy.KEEP` (or `REPLACE` for explicit manual button tap) to prevent redundant duplicate network requests if a worker is already running.
-- **Resize Policy:** Widget resizing (`onOptionChanged` / `LocalSize.current`) re-evaluates UI layout constraints and re-renders from the existing Room cache. **Resizing does NOT trigger a network fetch.**
-- **Boot Receiver Note:** Dropped as unnecessary. WorkManager automatically re-schedules periodic work across system reboots.
-- **Retry Policy & Max Attempt Limit:**
-  - Backoff policy: `BackoffPolicy.EXPONENTIAL` (initial delay 5 minutes).
-  - Max retry tracking: Enforced manually inside `RefreshWeatherWorker.doWork()` by inspecting `runAttemptCount`. If `runAttemptCount >= 3`, return `Result.failure()` to stop retrying until the next 30-minute periodic cycle.
+- **Manual Refresh Strategy:**
+  - Triggered when user taps manual refresh button on widget or in-app.
+  - Enqueue Policy: `ExistingWorkPolicy.KEEP` (retains current worker if running to prevent duplicate API requests).
+  - **Bypassing Cache Freshness:** Passes `forceRefresh = true` input data to bypass the 15-minute Room cache freshness check and force a network call to Open-Meteo.
+  - **Debounce / Short Throttle:** Enforces a **10-second debounce window** in the UI/action layer. Rapid manual taps within 10 seconds of a previous refresh action are ignored to prevent API spamming.
+- **Resize Policy:** Resizing a widget (`onOptionChanged` / `LocalSize.current`) re-evaluates UI layout constraints and re-renders from existing Room cache. **Resizing does NOT trigger a network fetch.**
+- **WorkManager Periodic Work Retry & Failure Behavior (Confirmed via Official Docs):**
+  - According to official Android WorkManager documentation ([developer.android.com/develop/background-work/background-tasks/persistent/how-to/states](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/states)):
+    - Periodic Work has only **one** terminal state: `CANCELLED`. Terminal states `SUCCEEDED` and `FAILED` apply **only** to one-time work.
+    - When `RefreshWeatherWorker` encounters a network failure during a periodic execution and returns `Result.retry()`, WorkManager reschedules that attempt using exponential backoff *within that execution period*.
+    - If retry attempts are exhausted or if the worker returns `Result.failure()` (when `runAttemptCount >= 3`), **the current run attempt ends, but the Periodic Work Request itself remains active in `ENQUEUED` state**.
+    - WorkManager automatically reschedules the periodic task for the **next periodic interval cycle** (30 minutes later).
+    - Periodic work is **never terminated** by `Result.failure()` or exhausted retries.
 
 ### 5.3 Absolute Timestamp & Failure Re-Rendering
 - **Absolute Timestamp Display:** The widget displays an **absolute time format** (e.g. `10:42 AM` or `Oct 24, 14:15`), avoiding relative strings like "15m ago" which would require continuous UI updates.
@@ -276,7 +301,7 @@ app/src/main/java/com/weatherapp/
 | **Phase 2** | **Project Initialization** | Version catalog, KSP, Hilt, Room schema config, dependencies, `.gitignore`, GitHub CI workflow (`.github/workflows/ci.yml`). | Low / Med | 5 hrs |
 | **Phase 3** | **Data Layer & Cache** | Open-Meteo Retrofit client, Geocoder, Room DB, Mappers, Repositories, DataStore, Unit tests for offline caching & repository. | Medium | 10 hrs |
 | **Phase 4** | **Main Application UI** | Compose Dashboard, 24h Hourly Forecast, 7-day Forecast Graph, Location Search & Saved Locations, Settings with Battery Guide & Open-Meteo Attribution. | High | 14 hrs |
-| **Phase 5** | **Widget Suite** | Single responsive Jetpack Glance widget with 4 size layouts (`Compact`, `Standard`, `Detailed`, `Minimal`), Hilt EntryPoint, WorkManager worker with failure re-render & retry limits, Worker tests. | High | 12 hrs |
+| **Phase 5** | **Widget Suite** | Single responsive Jetpack Glance widget (`Compact`, `Standard`, `Detailed` layouts + `Minimal` style option), `WeatherWidgetConfigActivity`, `onDeleted` cleanup, Hilt EntryPoint, WorkManager worker with failure re-render & retry limits, Worker tests. | High | 12 hrs |
 | **Phase 6** | **Testing & Hardening** | Integration testing, edge-case fixes, battery/network optimization, `docs/DEVICE_TEST_CHECKLIST.md`. | Medium | 6 hrs |
 | **Phase 7** | **Release Preparation** | App icon, signed APK configuration, release build, updated README/CHANGELOG, GitHub Release tag. | Low / Med | 4 hrs |
 | **Total** | | | | **~54 hrs** |

@@ -1,6 +1,6 @@
 # Phase 1: Technical Plan & Architecture Specification
 **Project:** Production-Grade Android Weather App with Smart Auto-Updating Widget  
-**Document Version:** 1.2  
+**Document Version:** 1.3  
 **Status:** Revised & Pending Approval  
 
 ---
@@ -32,20 +32,21 @@
 
 ### 1.3 Widget Framework & Architecture (`androidx.glance:glance-appwidget`)
 - **Feasibility:** High.
-- **Widget Architecture (Single `GlanceAppWidget` with Responsive Layouts & Minimal Style Option):**
+- **Widget Architecture (Single `GlanceAppWidget` with Size Breakpoints & Minimal Style Option):**
   - **Single Widget Definition:** Implement **one `GlanceAppWidget`** registered in `AndroidManifest.xml` rather than 4 separate widgets in the launcher picker.
-  - **Size-Based Responsive Layouts:** The widget evaluates `LocalSize.current` bounds (width x height) to automatically render one of three standard layouts:
-    1. `Compact` (e.g. 1x1 to 2x1: temperature, weather icon, location name)
-    2. `Standard` (e.g. 2x2: temperature, condition text, high/low range)
-    3. `Detailed` (e.g. 4x2: temperature, feels-like, humidity, wind speed, high/low range)
-  - **Per-Widget "Minimal" Style Option:** Users can toggle a "Minimal" style option in the configuration screen. When enabled for a specific widget ID, the widget overrides standard size layouts and displays a minimal, large temperature-focused layout regardless of size.
-  - **Configuration Activity (`WeatherWidgetConfigActivity`):**
-    - Triggered automatically by Android OS when a user places a new widget on the home screen (`android:configure`).
+  - **Size-Based Responsive Layouts (Defined in dp):** The widget evaluates `LocalSize.current` bounds (width x height in dp) to automatically render one of three standard size layouts:
+    1. `Compact` (Width < 180dp OR Height < 120dp): Temperature, Weather Icon, City Name.
+    2. `Standard` (Width 180dp–260dp AND Height 120dp–200dp): Temperature, Condition Description, High/Low Range, City Name.
+    3. `Detailed` (Width >= 260dp AND Height >= 200dp): Temperature, Condition, Feels-Like, Humidity, Wind Speed, High/Low Range, City Name, Absolute Last-Updated Time.
+  - **Per-Widget "Minimal" Style Option:** Users can toggle a "Minimal" style option in the configuration screen. When enabled for a specific widget ID, the widget overrides size breakpoints and displays a minimal, large temperature-focused layout regardless of widget dimensions.
+  - **Configuration Activity (`WeatherWidgetConfigActivity`) & `RESULT_CANCELED` Handling:**
+    - Declared via `android:configure` in `appwidget-provider` XML.
     - Receives `AppWidgetManager.EXTRA_APPWIDGET_ID`.
-    - Allows the user to configure: (1) Target location for this widget instance (Current GPS Location vs Specific Saved City), and (2) Style preference (Standard Responsive vs Minimal Temperature-Focused).
-    - Persists preferences into DataStore key-value pairs keyed by `appWidgetId`, returns `RESULT_OK`, and triggers immediate initial Glance widget rendering.
+    - **Default Result:** Activity sets `setResult(RESULT_CANCELED)` immediately upon launch. If the user presses the back button or exits before completing setup, Android cancels widget placement entirely so no unconfigured or orphaned widget is placed on the home screen.
+    - When confirmed by user: Saves per-widget settings to DataStore, triggers initial Glance widget update, sets `setResult(RESULT_OK, intent)`, and finishes.
+  - **Storage of Per-Widget Settings:** Per-widget settings (target location ID, "Follow GPS" flag, "Minimal" style override) are stored in **Jetpack DataStore Preferences** using Glance's `PreferencesGlanceStateDefinition` (keyed by `appWidgetId`, e.g. `widget_${appWidgetId}_location_id`).
   - **`onDeleted` Cleanup:**
-    - Override `GlanceAppWidgetReceiver.onDeleted(context, appWidgetIds)` to delete stored preferences for removed `appWidgetId`s from DataStore, preventing orphaned preference leaks.
+    - Override `GlanceAppWidgetReceiver.onDeleted(context, appWidgetIds)` to remove stored DataStore preferences for deleted `appWidgetId`s, preventing orphaned preference leaks.
 - **Icons & Graphics:**
   - **No Coil Required:** Weather condition icons are mapped directly from WMO weather codes to local vector drawables (`R.drawable.ic_weather_*`) rendered using Glance vector primitives. External image loading libraries (such as Coil) are unnecessary and removed from the dependency stack.
 
@@ -66,33 +67,41 @@
 
 ## 2. Recommended Tech Stack & Verified Versions
 
-### 2.1 Google Play Target API Level Requirement & Min SDK
-- **Google Play Target SDK Requirement:** Per official Google Play Policy ([developer.android.com/google-play/requirements/target-sdk](https://developer.android.com/google-play/requirements/target-sdk)), new apps and app updates must target **Android 15 (API level 35)** (or higher starting late 2024/2025).
-  - `compileSdk = 35`
-  - `targetSdk = 35`
-  - `minSdk = 26` (Android 8.0 Oreo — covers ~95%+ of active devices globally, providing native Notification Channels, `java.time` APIs without desugaring, and modern WorkManager capabilities).
+### 2.1 Google Play Target API 36 Requirement & Android 16 Behavior Changes
+- **Google Play Requirement:** Target API 36 (Android 16) requirement starting August 31, 2026.
+  - `compileSdk = 36`
+  - `targetSdk = 36`
+  - `minSdk = 26` (Android 8.0 Oreo)
+- **Relevant Android 16 (API 36) Behavior Changes & Handling:**
+  1. **Background Job Quotas (JobScheduler / WorkManager):** Strict runtime quotas for background execution. WorkManager schedules background refreshes during system maintenance windows without using long-running wake locks.
+  2. **RemoteViews & Widget Redraw Throttling:** Strict limits on background RemoteViews updates. Widget re-renders (`GlanceAppWidget.updateAll()`) are dispatched only when fresh cache data arrives or on explicit user action, avoiding redraw thrashing.
+  3. **Predictive Back Gestures:** Enabled by default in API 36. Navigation and Compose screens use `BackHandler` / `androidx.navigationevent` to manage predictive back transitions smoothly without unexpected activity exit.
 
-### 2.2 Verified Dependency Stack & Official Citations
-| Component | Library | Verified Stable Version | Official Source / Citation | Purpose |
+### 2.2 Verified Dependency Stack & Raw Metadata Queries (Fetched Live)
+
+Versions fetched directly from official Google Maven (`dl.google.com/dl/android/maven2/`), Maven Central (`repo1.maven.org/maven2/`), and `kotlinlang.org`:
+
+| Component | Library | Live Fetched Stable Version | Source URL & Fetch Metadata | Purpose |
 | :--- | :--- | :---: | :--- | :--- |
-| **Language** | Kotlin | `2.0.21` | [kotlinlang.org/docs/releases.html](https://kotlinlang.org/docs/releases.html) | Language & Compiler |
-| **Build Tool** | Android Gradle Plugin (AGP) | `8.7.3` | [developer.android.com/studio/releases/gradle-plugin](https://developer.android.com/studio/releases/gradle-plugin) | Android Build System |
-| **Annotation Processing** | KSP (`com.google.devtools.ksp`) | `2.0.21-1.0.27` | [github.com/google/ksp/releases](https://github.com/google/ksp/releases) | High-performance code gen (replaces kapt) |
-| **UI Framework** | Jetpack Compose BOM | `2024.10.01` | [developer.android.com/develop/ui/compose/bom/bom-mapping](https://developer.android.com/develop/ui/compose/bom/bom-mapping) | Material 3, Dynamic Color, UI primitives |
-| **Widget Engine** | Jetpack Glance AppWidget | `1.1.1` | [developer.android.com/jetpack/androidx/releases/glance](https://developer.android.com/jetpack/androidx/releases/glance) | Declarative Compose-style RemoteViews |
-| **Background Processing** | WorkManager KTX | `2.10.0` | [developer.android.com/jetpack/androidx/releases/work](https://developer.android.com/jetpack/androidx/releases/work) | Persistent task scheduling & constraints |
-| **Dependency Injection** | Hilt | `2.52` | [github.com/google/dagger/releases](https://github.com/google/dagger/releases) | Dependency injection & Hilt Worker integration |
-| **Database / Cache** | Room | `2.6.1` | [developer.android.com/jetpack/androidx/releases/room](https://developer.android.com/jetpack/androidx/releases/room) | Local SQLite weather cache & saved locations |
-| **Preferences** | DataStore Preferences | `1.1.1` | [developer.android.com/jetpack/androidx/releases/datastore](https://developer.android.com/jetpack/androidx/releases/datastore) | User & widget settings (°C/°F, location IDs) |
-| **Networking** | Retrofit 2 | `2.11.0` | [github.com/square/retrofit/releases](https://github.com/square/retrofit/releases) | Type-safe REST client |
-| **HTTP Client** | OkHttp 4 | `4.12.0` | [square.github.io/okhttp](https://square.github.io/okhttp) | HTTP networking & logging interceptor |
-| **Serialization** | kotlinx.serialization | `1.7.3` | [github.com/Kotlin/kotlinx.serialization/releases](https://github.com/Kotlin/kotlinx.serialization/releases) | Pure Kotlin JSON parsing |
-| **Location** | Play Services Location | `21.3.0` | [developer.android.com/google/play-services](https://developer.android.com/google/play-services) | Fused Location Provider API |
+| **Language** | Kotlin | `2.0.21` | `https://kotlinlang.org/docs/releases.html` | Language & Compiler |
+| **Build Tool** | Android Gradle Plugin (AGP) | `8.7.3` | `https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/maven-metadata.xml` | Build system (AGP 8.7+ supports API 36 compileSdk) |
+| **Annotation Processing** | KSP (`com.google.devtools.ksp`) | `2.0.21-1.0.27` | `https://repo1.maven.org/maven2/com/google/devtools/ksp/symbol-processing-api/maven-metadata.xml` | High-performance code gen (replaces kapt) |
+| **UI Framework** | Jetpack Compose BOM | `2024.10.01` | `https://dl.google.com/dl/android/maven2/androidx/compose/compose-bom/maven-metadata.xml` | Material 3, Dynamic Color, UI primitives |
+| **Widget Engine** | Jetpack Glance AppWidget | `1.1.1` | `https://dl.google.com/dl/android/maven2/androidx/glance/glance-appwidget/maven-metadata.xml` | Declarative Compose-style RemoteViews |
+| **Background Processing** | WorkManager KTX | `2.10.0` | `https://dl.google.com/dl/android/maven2/androidx/work/work-runtime-ktx/maven-metadata.xml` | Persistent task scheduling & constraints |
+| **Dependency Injection** | Hilt | `2.52` | `https://repo1.maven.org/maven2/com/google/dagger/hilt-android/maven-metadata.xml` | Dependency injection & Hilt Worker integration |
+| **Database / Cache** | Room | `2.6.1` | `https://dl.google.com/dl/android/maven2/androidx/room/room-runtime/maven-metadata.xml` | Local SQLite weather cache & saved locations |
+| **Preferences** | DataStore Preferences | `1.1.1` | `https://dl.google.com/dl/android/maven2/androidx/datastore/datastore-preferences/maven-metadata.xml` | User & widget settings (°C/°F, location IDs) |
+| **Networking** | Retrofit 2 | `2.11.0` | `https://repo1.maven.org/maven2/com/squareup/retrofit2/retrofit/maven-metadata.xml` | Type-safe REST client |
+| **HTTP Client** | OkHttp 4 | `4.12.0` | `https://repo1.maven.org/maven2/com/squareup/okhttp3/okhttp/maven-metadata.xml` | HTTP networking & logging interceptor |
+| **Serialization** | kotlinx.serialization | `1.7.3` | `https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json/maven-metadata.xml` | Pure Kotlin JSON parsing |
+| **Location** | Play Services Location | `21.3.0` | `https://dl.google.com/dl/android/maven2/com/google/android/gms/play-services-location/maven-metadata.xml` | Fused Location Provider API |
 
 ### 2.3 Compatibility Confirmation
 - **Kotlin 2.0.21 + KSP 2.0.21-1.0.27 + AGP 8.7.3:** Fully compatible. Kotlin 2.0+ uses the built-in Compose Compiler plugin (`org.jetbrains.kotlin.plugin.compose`).
+- **AGP 8.7.3 + compileSdk 36:** Fully supports compiling against Android 16 (API 36) SDK headers.
 - **Compose BOM 2024.10.01 + Glance 1.1.1:** Fully compatible. Provides Compose UI 1.7.x primitives for app UI and Glance 1.1.1 RemoteViews.
-- **Room 2.6.1 + Hilt 2.52 + WorkManager 2.10.0:** Fully compatible with KSP annotation processing and `@HiltWorker`.
+- **Room 2.6.1 + Hilt 2.52 + WorkManager 2.10.0:** Fully compatible with KSP annotation processing and `@HiltWorker` / `hilt-work:1.2.0`.
 
 ---
 
@@ -200,12 +209,12 @@ app/src/main/java/com/weatherapp/
 ├── widget/                          # Jetpack Glance Responsive Widget
 │   ├── WeatherGlanceWidget.kt       # Single responsive GlanceAppWidget definition
 │   ├── WeatherGlanceReceiver.kt     # GlanceAppWidgetReceiver (with onDeleted cleanup)
-│   ├── WeatherWidgetConfigActivity.kt # Configuration Activity per widget instance
+│   ├── WeatherWidgetConfigActivity.kt # Configuration Activity (with RESULT_CANCELED default)
 │   ├── GlanceDependencies.kt        # Hilt EntryPoint interface
 │   └── layouts/                     # Responsive size breakpoint & style layouts
-│       ├── CompactWidgetLayout.kt   # Size Variant 1: Temp, icon, location
-│       ├── StandardWidgetLayout.kt  # Size Variant 2: Temp, condition, high/low
-│       ├── DetailedWidgetLayout.kt  # Size Variant 3: Temp, feels-like, humidity, wind
+│       ├── CompactWidgetLayout.kt   # Size Variant 1 (<180dp x <120dp)
+│       ├── StandardWidgetLayout.kt  # Size Variant 2 (180-260dp x 120-200dp)
+│       ├── DetailedWidgetLayout.kt  # Size Variant 3 (>=260dp x >=200dp)
 │       └── MinimalWidgetLayout.kt   # Style Option Override: Large temp-focused
 └── worker/                          # Background WorkManager Workers
     └── RefreshWeatherWorker.kt      # Periodic & One-Time Refresh Worker (@HiltWorker)
@@ -251,7 +260,7 @@ app/src/main/java/com/weatherapp/
   - Enqueue Policy: `ExistingPeriodicWorkPolicy.UPDATE` (WorkManager 2.8+) to keep the schedule updated without resetting interval timings.
 - **Manual Refresh Strategy:**
   - Triggered when user taps manual refresh button on widget or in-app.
-  - Enqueue Policy: `ExistingWorkPolicy.KEEP` (retains current worker if running to prevent duplicate API requests).
+  - Enqueue Policy: **`ExistingWorkPolicy.KEEP` strictly** (retains existing running worker request, preventing duplicate API tasks).
   - **Bypassing Cache Freshness:** Passes `forceRefresh = true` input data to bypass the 15-minute Room cache freshness check and force a network call to Open-Meteo.
   - **Debounce / Short Throttle:** Enforces a **10-second debounce window** in the UI/action layer. Rapid manual taps within 10 seconds of a previous refresh action are ignored to prevent API spamming.
 - **Resize Policy:** Resizing a widget (`onOptionChanged` / `LocalSize.current`) re-evaluates UI layout constraints and re-renders from existing Room cache. **Resizing does NOT trigger a network fetch.**
@@ -301,7 +310,7 @@ app/src/main/java/com/weatherapp/
 | **Phase 2** | **Project Initialization** | Version catalog, KSP, Hilt, Room schema config, dependencies, `.gitignore`, GitHub CI workflow (`.github/workflows/ci.yml`). | Low / Med | 5 hrs |
 | **Phase 3** | **Data Layer & Cache** | Open-Meteo Retrofit client, Geocoder, Room DB, Mappers, Repositories, DataStore, Unit tests for offline caching & repository. | Medium | 10 hrs |
 | **Phase 4** | **Main Application UI** | Compose Dashboard, 24h Hourly Forecast, 7-day Forecast Graph, Location Search & Saved Locations, Settings with Battery Guide & Open-Meteo Attribution. | High | 14 hrs |
-| **Phase 5** | **Widget Suite** | Single responsive Jetpack Glance widget (`Compact`, `Standard`, `Detailed` layouts + `Minimal` style option), `WeatherWidgetConfigActivity`, `onDeleted` cleanup, Hilt EntryPoint, WorkManager worker with failure re-render & retry limits, Worker tests. | High | 12 hrs |
+| **Phase 5** | **Widget Suite** | Single responsive Jetpack Glance widget (`Compact`, `Standard`, `Detailed` layouts + `Minimal` style option), `WeatherWidgetConfigActivity` with `RESULT_CANCELED` default, `onDeleted` cleanup, Hilt EntryPoint, WorkManager worker with failure re-render & retry limits, Worker tests. | High | 12 hrs |
 | **Phase 6** | **Testing & Hardening** | Integration testing, edge-case fixes, battery/network optimization, `docs/DEVICE_TEST_CHECKLIST.md`. | Medium | 6 hrs |
 | **Phase 7** | **Release Preparation** | App icon, signed APK configuration, release build, updated README/CHANGELOG, GitHub Release tag. | Low / Med | 4 hrs |
 | **Total** | | | | **~54 hrs** |
